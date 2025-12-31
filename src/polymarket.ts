@@ -38,6 +38,13 @@ export interface PolyPosition {
   assetId: string;
 }
 
+// Cache de usernames para não fazer scraping repetido
+const usernameCache = new Map<
+  string,
+  { username: string; timestamp: number }
+>();
+const USERNAME_CACHE_TTL = 3600000; // 1 hora
+
 // Cache de portfolio com timestamp para cada carteira
 const portfolioSnapshots = new Map<
   string,
@@ -156,6 +163,12 @@ export async function fetchRecentActivity(
 
         if (sizeDiff > 0.5) {
           // Aumentou
+          // Calcula o preço médio da operação usando a diferença de investimento
+          const prevInvested = previous.size * previous.entryPrice;
+          const currInvested = current.size * current.entryPrice;
+          const investmentDiff = currInvested - prevInvested;
+          const avgPrice = investmentDiff / sizeDiff;
+
           activities.push({
             id: `${key}-increase-${Date.now()}`,
             timestamp: Date.now(),
@@ -163,16 +176,17 @@ export async function fetchRecentActivity(
             marketTitle: current.title,
             outcome: current.outcome,
             side: "BUY",
-            price: current.currentPrice,
+            price: avgPrice > 0 ? avgPrice : current.currentPrice,
             amount: sizeDiff
           });
           console.log(
             `   📈 Aumentou: ${current.title.slice(0, 40)} +${sizeDiff.toFixed(
               1
-            )} shares`
+            )} shares @ ${avgPrice.toFixed(3)}`
           );
         } else if (sizeDiff < -0.5) {
           // Diminuiu
+          // Para vendas, usa o preço atual do mercado (é o melhor que conseguimos sem API de trades)
           activities.push({
             id: `${key}-decrease-${Date.now()}`,
             timestamp: Date.now(),
@@ -186,7 +200,7 @@ export async function fetchRecentActivity(
           console.log(
             `   📉 Vendeu: ${current.title.slice(0, 40)} ${sizeDiff.toFixed(
               1
-            )} shares @ $${current.currentPrice.toFixed(2)}`
+            )} shares @ ${current.currentPrice.toFixed(3)}`
           );
         }
       }
@@ -214,13 +228,15 @@ export async function fetchRecentActivity(
       }
     }
 
-    // ATUALIZA O SNAPSHOT (importante!)
+    // ATUALIZA O SNAPSHOT SEMPRE (mesmo se não houver mudanças)
+    // Isso garante que o preço atual seja atualizado para próxima comparação
+    portfolioSnapshots.set(address, {
+      positions: currentMap,
+      timestamp: Date.now()
+    });
+
     if (activities.length > 0) {
       console.log(`   ✅ Detectou ${activities.length} mudança(s)`);
-      portfolioSnapshots.set(address, {
-        positions: currentMap,
-        timestamp: Date.now()
-      });
     }
 
     return activities;
@@ -256,12 +272,55 @@ async function fetchPortfolioRaw(address: string): Promise<PolyPosition[]> {
       const size = Number(pos.size || 0);
       if (size < 0.01) continue; // Ignora poeira
 
-      // CORRIGIDO: Pega o título do market corretamente
-      const title =
-        pos.market?.question ||
-        pos.market?.title ||
-        pos.market?.slug ||
-        `Market ${pos.asset?.slice(0, 8)}`;
+      // CORRIGIDO: Busca o título do market via API se necessário
+      let title = "Unknown Market";
+      const marketId = pos.market?.conditionId || pos.conditionId;
+
+      if (pos.market?.question) {
+        title = pos.market.question;
+      } else if (pos.market?.title) {
+        title = pos.market.title;
+      } else if (pos.market?.description) {
+        title = pos.market.description;
+      } else if (marketId) {
+        // Tenta buscar informações do market via API
+        try {
+          const marketReq = await axios.get(
+            `${GAMMA_API_URL}/markets/${marketId}`,
+            {
+              headers: BROWSER_HEADERS,
+              timeout: 2000,
+              validateStatus: (status) => status < 500
+            }
+          );
+
+          if (marketReq.data?.question) {
+            title = marketReq.data.question;
+          } else if (marketReq.data?.title) {
+            title = marketReq.data.title;
+          }
+        } catch {
+          // Se falhar, tenta pelo slug
+          if (pos.market?.slug) {
+            title = pos.market.slug
+              .split("-")
+              .map(
+                (word: string) => word.charAt(0).toUpperCase() + word.slice(1)
+              )
+              .join(" ");
+          } else {
+            title = `Market ${pos.asset?.slice(0, 8) || "Unknown"}`;
+          }
+        }
+      } else if (pos.market?.slug) {
+        title = pos.market.slug
+          .split("-")
+          .map((word: string) => word.charAt(0).toUpperCase() + word.slice(1))
+          .join(" ");
+      } else {
+        title = `Market ${pos.asset?.slice(0, 8) || "Unknown"}`;
+      }
+
       const slug = pos.market?.slug || "";
       const outcome = pos.outcome || "Unknown";
       const assetId = pos.asset || "";
@@ -368,10 +427,52 @@ export async function fetchPortfolio(address: string): Promise<PolyPosition[]> {
 export function clearCache(address: string): void {
   portfolioSnapshots.delete(address);
   portfolioCache.delete(address);
+  usernameCache.delete(address);
   console.log(`🗑️ Cache limpo para ${address.slice(0, 8)}`);
 }
 
-// 6. TESTE DE APIs
+// 6. BUSCAR USERNAME (com cache)
+export async function getUsernameFromAddress(
+  address: string
+): Promise<string | null> {
+  // Verifica cache
+  const cached = usernameCache.get(address);
+  if (cached && Date.now() - cached.timestamp < USERNAME_CACHE_TTL) {
+    return cached.username;
+  }
+
+  try {
+    // Busca o perfil via scraping
+    const profileUrl = `https://polymarket.com/profile/${address}`;
+    const { data: html } = await axios.get(profileUrl, {
+      headers: BROWSER_HEADERS,
+      timeout: 5000
+    });
+
+    // Procura pelo username no HTML
+    const patterns = [
+      /"username":"([^"]+)"/i,
+      /"name":"([^"]+)"/i,
+      /<title>([^<|]+)/i // Pega do título da página
+    ];
+
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match && match[1] && !match[1].includes("Polymarket")) {
+        const username = match[1].trim();
+        // Salva no cache
+        usernameCache.set(address, { username, timestamp: Date.now() });
+        return username;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// 7. TESTE DE APIs
 export async function testAPIConnection(address: string): Promise<void> {
   console.log(`\n🧪 TESTANDO APIs PARA ${address.slice(0, 8)}...\n`);
 

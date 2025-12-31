@@ -1,12 +1,16 @@
 import { Client, TextChannel, EmbedBuilder } from "discord.js";
 import { Wallet, Subscription } from "./models";
-import { fetchRecentActivity } from "./polymarket";
+import { fetchRecentActivity, getUsernameFromAddress } from "./polymarket";
 
-const CHECK_INTERVAL = 15000; // 30 segundos (monitoramento de portfolio)
+const CHECK_INTERVAL = 10000; // 10 segundos (mais rápido = preço mais preciso)
+
+// Cache para evitar duplicação de mensagens
+const sentMessages = new Map<string, number>(); // key: activityId, value: timestamp
+const MESSAGE_CACHE_TTL = 120000; // 2 minutos
 
 export async function startTrackerLoop(client: Client) {
   console.log(`🔥 TRACKER V3 INICIADO - Modo Portfolio Monitoring`);
-  console.log(`📊 Sistema: Compara snapshots do portfolio a cada 30s`);
+  console.log(`📊 Sistema: Compara snapshots do portfolio a cada 10s`);
   console.log(
     `🎯 Detecta: Novas posições, aumentos, diminuições e fechamentos\n`
   );
@@ -16,6 +20,14 @@ export async function startTrackerLoop(client: Client) {
       console.log(
         `💓 [${new Date().toLocaleTimeString()}] Verificando carteiras...`
       );
+
+      // Limpa cache de mensagens antigas (garbage collection)
+      const now = Date.now();
+      for (const [id, timestamp] of sentMessages.entries()) {
+        if (now - timestamp > MESSAGE_CACHE_TTL) {
+          sentMessages.delete(id);
+        }
+      }
 
       const wallets = await Wallet.find();
       console.log(`📊 Total de carteiras monitoradas: ${wallets.length}`);
