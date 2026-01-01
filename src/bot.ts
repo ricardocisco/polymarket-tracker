@@ -9,7 +9,8 @@ import {
   fetchPortfolio,
   resolveUser,
   testAPIConnection,
-  clearCache
+  clearCache,
+  getUsernameFromAddress
 } from "./polymarket";
 
 export const client = new Client({
@@ -315,14 +316,33 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     // Executa teste no console
     await testAPIConnection(address);
 
-    await interaction.editReply(
-      `✅ **Teste Concluído!**\n\n` +
-        `Verifique o console do servidor para ver os resultados detalhados.\n\n` +
-        `Os logs mostrarão:\n` +
-        `• Status de cada API (200, 404, etc)\n` +
-        `• Quantidade de dados retornados\n` +
-        `• Erros específicos, se houver`
-    );
+    // Busca uma posição de exemplo para debug
+    try {
+      const positions = await fetchPortfolio(address);
+      if (positions.length > 0) {
+        const sample = positions[0];
+        await interaction.editReply(
+          `✅ **Teste Concluído!**\n\n` +
+            `Verifique o console do servidor para ver os resultados detalhados.\n\n` +
+            `**Exemplo de posição encontrada:**\n` +
+            `• Mercado: ${sample.title}\n` +
+            `• Outcome: ${sample.outcome}\n` +
+            `• Size: ${sample.size.toFixed(1)} shares\n` +
+            `• Asset ID: \`${sample.assetId}\``
+        );
+      } else {
+        await interaction.editReply(
+          `✅ **Teste Concluído!**\n\n` +
+            `Verifique o console. Nenhuma posição ativa encontrada.`
+        );
+      }
+    } catch (e: any) {
+      await interaction.editReply(
+        `⚠️ **Teste parcial concluído**\n\n` +
+          `Erro: ${e.message}\n\n` +
+          `Verifique o console para mais detalhes.`
+      );
+    }
   }
 
   // ===== COMANDO /LIST =====
@@ -351,14 +371,21 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
       for (const sub of subs) {
         const wallet = await Wallet.findOne({ address: sub.walletAddress });
+        const username = wallet
+          ? await getUsernameFromAddress(wallet.address)
+          : null;
+        const displayName = username ? `@${username}` : null;
+        let description = "";
+        if (displayName) {
+          description = `User: ${displayName}\n`;
+        }
+        description += `Carteira: ${sub.walletAddress}`;
         const lastCheck = wallet?.lastTimestamp
           ? new Date(wallet.lastTimestamp).toLocaleString("pt-BR")
           : "Nunca";
 
         embed.addFields({
-          name: `\`${sub.walletAddress.slice(0, 6)}...${sub.walletAddress.slice(
-            -4
-          )}\``,
+          name: `${description}`,
           value: `[Ver perfil](https://polymarket.com/profile/${sub.walletAddress}) • Última checagem: ${lastCheck}`,
           inline: false
         });

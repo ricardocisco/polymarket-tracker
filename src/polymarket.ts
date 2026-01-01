@@ -270,60 +270,30 @@ async function fetchPortfolioRaw(address: string): Promise<PolyPosition[]> {
 
     for (const pos of response.data) {
       const size = Number(pos.size || 0);
-      if (size < 0.01) continue; // Ignora poeira
+      if (size < 0.01) continue;
 
-      // CORRIGIDO: Busca o título do market via API se necessário
       let title = "Unknown Market";
-      const marketId = pos.market?.conditionId || pos.conditionId;
+      const conditionId = pos.conditionId;
+      const outcome = pos.outcome || "Unknown";
+      const assetId = pos.asset || "";
 
+      // Prioridade: usa o que vier no objeto market
       if (pos.market?.question) {
         title = pos.market.question;
       } else if (pos.market?.title) {
         title = pos.market.title;
-      } else if (pos.market?.description) {
-        title = pos.market.description;
-      } else if (marketId) {
-        // Tenta buscar informações do market via API
-        try {
-          const marketReq = await axios.get(
-            `${GAMMA_API_URL}/markets/${marketId}`,
-            {
-              headers: BROWSER_HEADERS,
-              timeout: 2000,
-              validateStatus: (status) => status < 500
-            }
-          );
-
-          if (marketReq.data?.question) {
-            title = marketReq.data.question;
-          } else if (marketReq.data?.title) {
-            title = marketReq.data.title;
-          }
-        } catch {
-          // Se falhar, tenta pelo slug
-          if (pos.market?.slug) {
-            title = pos.market.slug
-              .split("-")
-              .map(
-                (word: string) => word.charAt(0).toUpperCase() + word.slice(1)
-              )
-              .join(" ");
-          } else {
-            title = `Market ${pos.asset?.slice(0, 8) || "Unknown"}`;
-          }
-        }
       } else if (pos.market?.slug) {
+        // Formata o slug para ficar legível
         title = pos.market.slug
           .split("-")
           .map((word: string) => word.charAt(0).toUpperCase() + word.slice(1))
           .join(" ");
       } else {
-        title = `Market ${pos.asset?.slice(0, 8) || "Unknown"}`;
+        // Fallback: usa o assetId truncado
+        title = `Market ${assetId.slice(0, 8)}`;
       }
 
       const slug = pos.market?.slug || "";
-      const outcome = pos.outcome || "Unknown";
-      const assetId = pos.asset || "";
 
       const entryPrice = Number(pos.avgPrice || 0);
       let currentPrice = entryPrice;
